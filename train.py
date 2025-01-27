@@ -155,7 +155,7 @@ def train_one_epoch(
     return tensorboard_step, alpha, avg_critic_loss, avg_gen_loss
 
 
-def train_mode():
+def train_model():
     """Main function to train the GAN."""
     clear_directories()
 
@@ -204,4 +204,4 @@ def train_mode():
 
 
 if __name__ == "__main__":
-    train_mode()
+    train_model()
