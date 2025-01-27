@@ -4,12 +4,12 @@ import torch.nn.functional as F
 
 
 """
-This list determines how the number of channels changes at each layer of the generator and discriminator.
+This list determines how the number of channels changes at each layer of the generator and critic.
 
 The first 5 layers keep the same number of channels.
 After that, the number of channels reduces progressively.    
 """
-factors = [1, 1, 1, 1, 1 / 2, 1 / 4, 1 / 8, 1 / 16, 1 / 32]
+factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
 
 class WSConv2d(nn.Module):
@@ -111,21 +111,36 @@ class Generator(nn.Module):
             self.rgb_layers.append(WSConv2d(conv_out_c, img_channels, kernel_size=1, stride=1, padding=0))
 
     def fade_in(self, alpha, upscaled, generated):
+        """
+        Smoothly blends two images: one from lower resolution (upscaled) and one from the new layer (generated).
+
+        Args:
+        - `alpha`: Blend factor (0 = only upscaled, 1 = only generated)
+        - `upscaled`: Lower resolution image, resized to the new resolution
+        - `generated`: Newly generated high-resolution image
+        """
         return torch.tanh(alpha * generated + (1 - alpha) * upscaled)
 
     def forward(self, x, alpha, steps):
-        out = self.initial(x)
+        """
+        Generates an image from latent vector `x`.
+        
+        Args:
+        - `alpha`: Fade-in factor (0 to 1) for smooth resolution transitions
+        - `steps`: Number of resolution doubling steps
+        """
+        out = self.initial(x)  # Start with the 4x4 image
 
         if steps == 0:
-            return self.initial_rgb(out)
+            return self.initial_rgb(out)  # If first step, directly convert to RGB
 
         for step in range(steps):
-            upscaled = F.interpolate(out, scale_factor=2, mode="nearest")
-            out = self.prog_blocks[step](upscaled)
+            upscaled = F.interpolate(out, scale_factor=2, mode="nearest")  # Upscale previous output
+            out = self.prog_blocks[step](upscaled)  # Apply convolutional block
 
-        final_upscaled = self.rgb_layers[steps - 1](upscaled)
-        final_out = self.rgb_layers[steps](out)
-        return self.fade_in(alpha, final_upscaled, final_out)
+        final_upscaled = self.rgb_layers[steps - 1](upscaled)  # Lower-resolution RGB
+        final_out = self.rgb_layers[steps](out)  # Higher-resolution RGB
+        return self.fade_in(alpha, final_upscaled, final_out)  # Blend images
 
 
 class Critic(nn.Module):
@@ -155,7 +170,7 @@ class Critic(nn.Module):
         self.avg_pool = nn.AvgPool2d(kernel_size=2, stride=2)
 
         self.final_block = nn.Sequential(
-            WSConv2d(in_channels + 1, in_channels, kernel_size=3, padding=1),
+            WSConv2d(in_channels + 1, in_channels, kernel_size=3, padding=1),  # +1 for minibatch std
             nn.LeakyReLU(0.2),
             WSConv2d(in_channels, in_channels, kernel_size=4, padding=0, stride=1),
             nn.LeakyReLU(0.2),
@@ -163,28 +178,47 @@ class Critic(nn.Module):
         )
 
     def fade_in(self, alpha, downscaled, out):
-        """Used to fade in downscaled using avg pooling and output from CNN"""
+        """
+        Smooth transition between downscaled previous resolution and the new resolution.
+
+        Args:
+        - `alpha`: Blend factor (0 = only downscaled, 1 = only out)
+        - `downscaled`: Lower-resolution features, reduced using avg pooling
+        - `out`: Features from the new resolution step
+        """
         return alpha * out + (1 - alpha) * downscaled
 
     def minibatch_std(self, x):
+        """
+        Adds a minibatch standard deviation channel to detect mode collapse.
+        - Computes std across the batch, averages across channels.
+        - Expands to match feature map size and concatenates to input.
+        """
         batch_statistics = (torch.std(x, dim=0).mean().repeat(x.shape[0], 1, x.shape[2], x.shape[3]))
         return torch.cat([x, batch_statistics], dim=1)
 
     def forward(self, x, alpha, steps):
+        """
+        Classifies an image as real or fake.
+
+        Args:
+        - `alpha`: Fade-in blending factor
+        - `steps`: Number of resolution doubling steps
+        """
         cur_step = len(self.prog_blocks) - steps
-        out = self.leaky(self.rgb_layers[cur_step](x))
+        out = self.leaky(self.rgb_layers[cur_step](x))  # Convert image to feature map
 
         if steps == 0:
             out = self.minibatch_std(out)
-            return self.final_block(out).view(out.shape[0], -1)
+            return self.final_block(out).view(out.shape[0], -1)  # Flatten output
 
-        downscaled = self.leaky(self.rgb_layers[cur_step + 1](self.avg_pool(x)))
-        out = self.avg_pool(self.prog_blocks[cur_step](out))
-        out = self.fade_in(alpha, downscaled, out)
+        downscaled = self.leaky(self.rgb_layers[cur_step + 1](self.avg_pool(x)))  # Downscale image
+        out = self.avg_pool(self.prog_blocks[cur_step](out))  # Apply convolution
+        out = self.fade_in(alpha, downscaled, out)  # Blend resolutions
 
         for step in range(cur_step + 1, len(self.prog_blocks)):
             out = self.prog_blocks[step](out)
             out = self.avg_pool(out)
 
-        out = self.minibatch_std(out)
+        out = self.minibatch_std(out)  # Add minibatch standard deviation
         return self.final_block(out).view(out.shape[0], -1)
