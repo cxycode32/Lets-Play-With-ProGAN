@@ -1,0 +1,7 @@
+torch
+torchvision
+torch-tb-profiler
+tensorboard
+matplotlib
+tqdm
+imageio

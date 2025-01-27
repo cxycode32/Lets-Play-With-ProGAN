@@ -1,0 +1,22 @@
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore virtual environment files
+venv/
+.env/
+*.venv
+*.env
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore model and datasets
+dataset/
+models/
+
+# Ignore TensorBoard logs
+logs/
+
