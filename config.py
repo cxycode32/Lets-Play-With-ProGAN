@@ -19,8 +19,8 @@ LAMBDA_GP = 10
 FIXED_NOISE = torch.randn(8, Z_DIM, 1, 1).to(DEVICE)
 
 MODEL_DIR = "models"
-DATASET_DIR = "celeb_dataset"
+DATASET_DIR = "dataset"
 ASSETS_DIR = "assets"
-IMAGE_DIR = "fake_images"
+IMAGE_DIR = "generated_images"
 LOG_DIR = "logs"
 DIRECTORIES=[MODEL_DIR, ASSETS_DIR, IMAGE_DIR, LOG_DIR]

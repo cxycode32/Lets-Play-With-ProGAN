@@ -12,11 +12,11 @@ from utils import (
     clear_directories,
     save_checkpoint,
     load_checkpoint,
-    plot_losses,
-    save_fake_images,
+    plot_training_losses,
+    save_generated_images,
     create_gif,
     gradient_penalty,
-    plot_to_tensorboard,
+    log_metrics_to_tensorboard,
 )
 
 """
@@ -136,7 +136,7 @@ def train_one_epoch(
 
             with torch.no_grad():
                 fixed_fakes = generator(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
-                plot_to_tensorboard(
+                log_metrics_to_tensorboard(
                     writer,
                     critic_loss.item(),
                     gen_loss.item(),
@@ -196,10 +196,10 @@ def train_mode():
                 save_checkpoint("critic", epoch, critic, opt_critic)
                 save_checkpoint("generator", epoch, generator, opt_gen)
 
-            save_fake_images(str(epoch_num), generator, alpha, step, epoch)
+            save_generated_images(str(epoch_num), generator, alpha, step, epoch)
 
         step += 1
-        plot_losses(str(epoch_num), critic_losses, gen_losses)
+        plot_training_losses(str(epoch_num), critic_losses, gen_losses)
         create_gif(str(epoch_num))
 
 
