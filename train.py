@@ -33,19 +33,19 @@ When to use it:
 torch.backends.cudnn.benchmarks = True
 
 
-def get_epoch(model):
+def prompt_for_epoch(model):
+    """Prompts the user for an epoch number to load a model from."""
     epoch = input(f"What epoch do you want to load the {model} model from: ").strip()
 
     if not epoch.isdigit():
         print("Invalid input. Defaulting to epoch 0.")
-        epoch = 0
-    else:
-        epoch = int(epoch)
+        return 0
 
-    return epoch
+    return int(epoch)
 
 
-def get_loader(image_size):
+def prepare_dataloader(image_size):
+    """Prepares the DataLoader for training, applying transformations and normalization."""
     transform = transforms.Compose(
         [
             transforms.Resize((image_size, image_size)),
@@ -65,27 +65,21 @@ def get_loader(image_size):
     return loader, dataset
 
 
-def train_fn(
-        critic,
-        generator,
-        opt_critic,
-        opt_gen,
-        scaler_critic,
-        scaler_gen,
-        writer,
-        tensorboard_step,
-        step,
-        alpha,
-        loader,
-        dataset,
-        epoch,
-        epoch_num
+def train_one_epoch(
+        critic, generator, opt_critic, opt_gen,
+        scaler_critic, scaler_gen, writer,
+        tensorboard_step, step, alpha,
+        loader, dataset, epoch, epoch_num
 ):
+    """Trains the generator and critic for one epoch."""
     loop = tqdm(loader, leave=True)
-    critic_loss_epoch = 0.0
-    gen_loss_epoch = 0.0
+    critic_loss_epoch, gen_loss_epoch = 0.0, 0.0
 
     for batch_idx, (real, _) in enumerate(loop):
+        real = real.to(config.DEVICE)
+        cur_batch_size = real.shape[0]
+        noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1).to(config.DEVICE)
+
         """
         Critic Training
 
@@ -94,13 +88,6 @@ def train_fn(
         2. Getting fake images -> predict 0
         3. Update weights to improve accuracy
         """
-
-        real = real.to(config.DEVICE)
-        cur_batch_size = real.shape[0]
-
-        # Train Critic: max E[critic(real)] - E[critic(fake)] <-> min -E[critic(real)] + E[critic(fake)]
-        # which is equivalent to minimizing the negative of the expression
-        noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1).to(config.DEVICE)
 
         with torch.cuda.amp.autocast():
             fake = generator(noise, alpha, step)
@@ -129,7 +116,6 @@ def train_fn(
         1. Trying to fool the critic to predict 1 for fake images.
         """
 
-        # Train Generator: max E[critic(gen_fake)] <-> min -E[critic(gen_fake)]
         with torch.cuda.amp.autocast():
             gen_fake = critic(fake, alpha, step)
             gen_loss = -torch.mean(gen_fake)
@@ -140,20 +126,16 @@ def train_fn(
         scaler_gen.step(opt_gen)
         scaler_gen.update()
 
-        # Update alpha and ensure less than 1
+        # Update alpha (used for smooth fade-in)
         alpha += cur_batch_size / ((config.PROGRESSIVE_EPOCHS[step] * 0.5) * len(dataset))
         alpha = min(alpha, 1)
 
         if batch_idx % 500 == 0:
-            print(f"EPOCH[{epoch + 1}/{epoch_num}], "
-                  f"BATCH[{batch_idx}/{len(loader)}]"
-                  f"CRITIC LOSS: {critic_loss:.2f}, "
-                  f"GEN LOSS: {gen_loss:.2f}"
-                  )
+            print(f"EPOCH[{epoch + 1}/{epoch_num}], BATCH[{batch_idx}/{len(loader)}], "
+                  f"CRITIC LOSS: {critic_loss:.2f}, GEN LOSS: {gen_loss:.2f}")
 
             with torch.no_grad():
                 fixed_fakes = generator(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
-
                 plot_to_tensorboard(
                     writer,
                     critic_loss.item(),
@@ -173,7 +155,8 @@ def train_fn(
     return tensorboard_step, alpha, avg_critic_loss, avg_gen_loss
 
 
-def train():
+def train_mode():
+    """Main function to train the GAN."""
     clear_directories()
 
     critic = Critic(config.IN_CHANNELS, img_channels=config.IMG_CHANNELS).to(config.DEVICE)
@@ -182,56 +165,36 @@ def train():
     opt_critic = optim.Adam(critic.parameters(), lr=config.LEARNING_RATE, betas=(0.0, 0.99))
     opt_gen = optim.Adam(generator.parameters(), lr=config.LEARNING_RATE, betas=(0.0, 0.99))
 
-    scaler_critic = torch.cuda.amp.GradScaler()
-    scaler_gen = torch.cuda.amp.GradScaler()
-
+    scaler_critic, scaler_gen = torch.cuda.amp.GradScaler(), torch.cuda.amp.GradScaler()
     writer = SummaryWriter(f"{config.LOG_DIR}/gan")
 
     if config.LOAD_MODEL:
-        critic_epoch = get_epoch("critic")
-        load_checkpoint("critic", critic_epoch, critic, opt_critic)
+        load_checkpoint("critic", prompt_for_epoch("critic"), critic, opt_critic)
+        load_checkpoint("generator", prompt_for_epoch("generator"), generator, opt_gen)
 
-        gen_epoch = get_epoch("generator")
-        load_checkpoint("generator", gen_epoch, generator, opt_gen)
-
-    tensorboard_step = 0
-    step = int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
-
-    critic.train()
-    generator.train()
+    tensorboard_step, step = 0, int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
+    critic.train(), generator.train()
 
     for epoch_num in config.PROGRESSIVE_EPOCHS[step:]:
-        alpha = 1e-5
-        image_size = 4 * 2 ** step
-        loader, dataset = get_loader(image_size)
+        alpha, image_size = 1e-5, 4 * 2 ** step
+        loader, dataset = prepare_dataloader(image_size)
         print(f"Current image size: {image_size}")
         critic_losses, gen_losses = [], []
 
         for epoch in range(epoch_num):
-            tensorboard_step, alpha, avg_critic_loss, avg_gen_loss = train_fn(
-                critic,
-                generator,
-                opt_critic,
-                opt_gen,
-                scaler_critic,
-                scaler_gen,
-                writer,
-                tensorboard_step,
-                step,
-                alpha,
-                loader,
-                dataset,
-                epoch,
-                epoch_num
+            tensorboard_step, alpha, avg_critic_loss, avg_gen_loss = train_one_epoch(
+                critic, generator, opt_critic, opt_gen,
+                scaler_critic, scaler_gen, writer,
+                tensorboard_step, step, alpha,
+                loader, dataset, epoch, epoch_num
             )
 
             critic_losses.append(avg_critic_loss)
             gen_losses.append(avg_gen_loss)
 
-            if epoch % 10 == 0:
-                if config.SAVE_MODEL:
-                    save_checkpoint("critic", epoch, critic, opt_critic)
-                    save_checkpoint("generator", epoch, generator, opt_gen)
+            if epoch % 10 == 0 and config.SAVE_MODEL:
+                save_checkpoint("critic", epoch, critic, opt_critic)
+                save_checkpoint("generator", epoch, generator, opt_gen)
 
             save_fake_images(str(epoch_num), generator, alpha, step, epoch)
 
@@ -241,4 +204,4 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    train_mode()
